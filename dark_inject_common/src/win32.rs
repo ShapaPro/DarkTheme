@@ -75,7 +75,16 @@ pub const TVM_SETLINECOLOR: u32 = 0x1128;
 pub const LVM_SETBKCOLOR: u32 = 0x1001;
 pub const LVM_SETTEXTCOLOR: u32 = 0x1024;
 pub const LVM_SETTEXTBKCOLOR: u32 = 0x1026;
-// HDM_SETBKCOLOR — best-effort, не во всех версиях comctl32 задокументировано одинаково.
+pub const LVM_GETBKCOLOR: u32 = 0x1000; // LVM_FIRST + 0
+// HDM_SETBKCOLOR — ВНИМАНИЕ: этого сообщения не существует в реальном Win32
+// Header control API. Значение 0x1201 (HDM_FIRST + 1) на самом деле совпадает
+// с HDM_INSERTITEMA, которое трактует lParam как указатель на структуру
+// HDITEMA. Подтверждено эмпирически (Task 7): отправка этого сообщения
+// реальному SysHeader32 с lParam = цвет вызывает STATUS_ACCESS_VIOLATION,
+// потому что контрол пытается разыменовать "указатель" = произвольное число.
+// НЕ ОТПРАВЛЯТЬ этот message реальным Header-контролам. Оставлено как
+// константа для документации находки; вызывающий код должен красить
+// SysHeader32 только через SetWindowTheme.
 pub const HDM_SETBKCOLOR: u32 = 0x1201;
 
 // --- DWM ---
@@ -218,6 +227,8 @@ extern "system" {}
 #[link(name = "uxtheme")]
 extern "system" {}
 #[link(name = "comctl32")]
+extern "system" {}
+#[link(name = "user32")]
 extern "system" {}
 
 pub fn to_wide(s: &str) -> Vec<u16> {
