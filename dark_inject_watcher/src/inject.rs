@@ -40,17 +40,20 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<(), String> {
             &mut written,
         );
         if ok == 0 || written != byte_len {
+            VirtualFreeEx(process, remote_mem, 0, MEM_RELEASE);
             CloseHandle(process);
             return Err("WriteProcessMemory failed".to_string());
         }
 
         let kernel32 = GetModuleHandleW(to_wide("kernel32.dll").as_ptr());
         if kernel32 == 0 {
+            VirtualFreeEx(process, remote_mem, 0, MEM_RELEASE);
             CloseHandle(process);
             return Err("GetModuleHandleW(kernel32.dll) failed".to_string());
         }
         let load_library_w = GetProcAddress(kernel32, b"LoadLibraryW\0".as_ptr());
         if load_library_w.is_null() {
+            VirtualFreeEx(process, remote_mem, 0, MEM_RELEASE);
             CloseHandle(process);
             return Err("GetProcAddress(LoadLibraryW) failed".to_string());
         }
@@ -66,11 +69,16 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<(), String> {
             &mut thread_id,
         );
         if thread == 0 {
+            VirtualFreeEx(process, remote_mem, 0, MEM_RELEASE);
             CloseHandle(process);
             return Err("CreateRemoteThread failed".to_string());
         }
 
         WaitForSingleObject(thread, 5000);
+        // Свободна к освобождению только после того, как удалённый поток
+        // (LoadLibraryW) гарантированно прочитал строку пути — WaitForSingleObject
+        // выше это обеспечивает.
+        VirtualFreeEx(process, remote_mem, 0, MEM_RELEASE);
         CloseHandle(thread);
         CloseHandle(process);
     }

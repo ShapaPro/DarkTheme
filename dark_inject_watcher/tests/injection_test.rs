@@ -1,19 +1,30 @@
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 // timeout.exe polls console input to detect Ctrl+C even with /NOBREAK, so it
 // refuses to run ("ERROR: Input redirection is not supported, exiting the
 // process immediately.") when its stdin isn't a real console -- which is the
 // case whenever `cargo test` itself runs without one (headless CI runners,
-// scheduled tasks, this repo's own agent-driven test runs). Giving the child
-// its own console with CREATE_NEW_CONSOLE sidesteps that regardless of what
-// console (if any) the test runner has.
-const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+// scheduled tasks, this repo's own agent-driven test runs). CREATE_NO_WINDOW
+// gives the child a real (but hidden) console, sidestepping that without
+// popping a visible console window on screen the way CREATE_NEW_CONSOLE would.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[path = "../src/inject.rs"]
 mod inject;
+
+/// Гарантирует, что порождённый процесс будет убит, даже если assert внутри
+/// теста запаникует до того, как дойдёт до обычной очистки в конце функции.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 fn marker_dll_path() -> PathBuf {
     // Воркспейс шарит один target/ каталог между членами workspace.
@@ -42,14 +53,15 @@ fn injects_marker_dll_into_real_process_and_confirms_load() {
 
     // timeout.exe — реальный процесс Windows, не требует прав администратора,
     // безопасно убить в конце теста.
-    let mut child = Command::new("timeout")
+    let child = Command::new("timeout")
         .args(["/T", "20", "/NOBREAK"])
         .stdout(std::process::Stdio::null())
-        .creation_flags(CREATE_NEW_CONSOLE)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .expect("failed to spawn timeout.exe");
+    let mut guard = KillOnDrop(child);
 
-    let pid = child.id();
+    let pid = guard.0.id();
 
     let result = inject::inject_dll(pid, &dll_path);
     assert!(result.is_ok(), "inject_dll failed: {:?}", result);
@@ -66,8 +78,8 @@ fn injects_marker_dll_into_real_process_and_confirms_load() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = guard.0.kill();
+    let _ = guard.0.wait();
     let _ = std::fs::remove_file(marker_log_path());
 
     assert!(found, "marker DLL did not confirm load into pid {}", pid);
