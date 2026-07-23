@@ -98,7 +98,6 @@ pub struct INITCOMMONCONTROLSEX {
 
 // --- Window creation for tests ---
 pub const HWND_MESSAGE: isize = -3;
-pub const WS_CHILD_STYLE: u32 = WS_CHILD;
 
 extern "system" {
     // kernel32
@@ -214,10 +213,22 @@ extern "system" {
 
 #[link(name = "dwmapi")]
 extern "system" {}
+#[link(name = "uxtheme")]
+extern "system" {}
 #[link(name = "comctl32")]
 extern "system" {}
 
 pub fn to_wide(s: &str) -> Vec<u16> {
     use std::iter::once;
     s.encode_utf16().chain(once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_wide() {
+        assert_eq!(to_wide("abc"), vec![97u16, 98, 99, 0]);
+    }
 }
