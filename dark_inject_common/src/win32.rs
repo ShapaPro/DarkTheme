@@ -6,12 +6,37 @@ pub type HANDLE = isize;
 pub type HMODULE = isize;
 pub type HINSTANCE = isize;
 pub type HHOOK = isize;
+pub type HDC = isize;
+pub type HBRUSH = isize;
+
+pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 
 pub const INVALID_HANDLE_VALUE: isize = -1;
 
 // --- Toolhelp32 ---
 pub const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 pub const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+pub const TH32CS_SNAPMODULE: u32 = 0x0000_0008;
+
+#[repr(C)]
+pub struct MODULEENTRY32W {
+    pub dwSize: u32,
+    pub th32ModuleID: u32,
+    pub th32ProcessID: u32,
+    pub GlblcntUsage: u32,
+    pub ProccntUsage: u32,
+    pub modBaseAddr: *mut u8,
+    pub modBaseSize: u32,
+    pub hModule: HMODULE,
+    pub szModule: [u16; 256],
+    pub szExePath: [u16; 260],
+}
+
+impl Default for MODULEENTRY32W {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
 
 #[repr(C)]
 pub struct PROCESSENTRY32W {
@@ -153,6 +178,8 @@ extern "system" {
     pub fn Process32NextW(hSnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> i32;
     pub fn Thread32First(hSnapshot: HANDLE, lpte: *mut THREADENTRY32) -> i32;
     pub fn Thread32Next(hSnapshot: HANDLE, lpte: *mut THREADENTRY32) -> i32;
+    pub fn Module32FirstW(hSnapshot: HANDLE, lpme: *mut MODULEENTRY32W) -> i32;
+    pub fn Module32NextW(hSnapshot: HANDLE, lpme: *mut MODULEENTRY32W) -> i32;
     pub fn CloseHandle(hObject: HANDLE) -> i32;
     pub fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> HANDLE;
     pub fn VirtualAllocEx(
@@ -256,6 +283,9 @@ extern "system" {
         lpParam: *mut c_void,
     ) -> HWND;
     pub fn DestroyWindow(hWnd: HWND) -> i32;
+    pub fn VirtualProtect(lpAddress: *mut c_void, dwSize: usize, flNewProtect: u32, lpflOldProtect: *mut u32) -> i32;
+    pub fn GetDC(hWnd: HWND) -> HDC;
+    pub fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
 
     // dwmapi
     pub fn DwmSetWindowAttribute(
@@ -270,6 +300,14 @@ extern "system" {
 
     // comctl32
     pub fn InitCommonControlsEx(picce: *const INITCOMMONCONTROLSEX) -> i32;
+
+    // gdi32 — реальная 1С красит содержимое через эти вызовы (нет ни
+    // SysTreeView32, ни любого другого common control, см. CLAUDE.md
+    // "Главная находка"), поэтому единственный способ перекрасить содержимое —
+    // подменить эти функции в IAT самого 1cv8.exe.
+    pub fn SetBkColor(hdc: HDC, color: u32) -> u32;
+    pub fn SetTextColor(hdc: HDC, color: u32) -> u32;
+    pub fn CreateSolidBrush(color: u32) -> HBRUSH;
 }
 
 #[link(name = "dwmapi")]
@@ -279,6 +317,8 @@ extern "system" {}
 #[link(name = "comctl32")]
 extern "system" {}
 #[link(name = "user32")]
+extern "system" {}
+#[link(name = "gdi32")]
 extern "system" {}
 
 pub fn to_wide(s: &str) -> Vec<u16> {

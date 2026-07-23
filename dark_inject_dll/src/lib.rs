@@ -1,4 +1,6 @@
+pub mod cairohook;
 pub mod color;
+pub mod gdihook;
 pub mod hook;
 pub mod worker;
 

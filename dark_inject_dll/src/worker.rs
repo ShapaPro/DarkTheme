@@ -129,6 +129,14 @@ pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
 
     let config = load_config(hinst);
     set_active_colors(config.colors);
+    crate::gdihook::set_active_colors(config.colors);
+    crate::cairohook::set_active_colors(config.colors);
+    // Красим содержимое (не только рамку) через подмену GDI- и cairo-вызовов
+    // в IAT всех модулей процесса — см. gdihook.rs/cairohook.rs за тем, почему
+    // обычный SendMessage-подход (color.rs/hook.rs) не имеет адресата в этом
+    // конкретном приложении (1С рисует всё сама, реальный рендер — cairo).
+    crate::gdihook::install();
+    crate::cairohook::install();
 
     let mut last_hierarchy: Option<Vec<WindowInfo>> = None;
     log_hierarchy_if_changed(pid, &mut last_hierarchy);
