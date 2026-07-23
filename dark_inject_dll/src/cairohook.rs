@@ -25,9 +25,37 @@
 use dark_inject_common::config::Colors;
 use dark_inject_common::iat::{for_each_import_across_process, patch_iat_slot};
 use std::collections::HashSet;
+use std::io::Write;
 use std::sync::Mutex;
 
 static ACTIVE_COLORS: Mutex<Colors> = Mutex::new(Colors { bg: 0x1E1E1E, text: 0xD4D4D4, line: 0x3C3C3C });
+// Диагностика: реальная палитра, которую 1С прогоняет через cairo (по
+// образцу PaletteLog.dll из внешнего источника) — какие цвета не попадают
+// ни в "светлый фон", ни в "тёмный текст" (например, кнопки), видно только
+// так, а не гадая по скриншотам. Дедуп по округлённому (r,g,b), чтобы не
+// писать на диск при каждом вызове (их тысячи в секунду).
+static SEEN_COLORS: Mutex<Option<HashSet<(u8, u8, u8)>>> = Mutex::new(None);
+
+fn log_color_if_new(r: f64, g: f64, b: f64, mapped: (f64, f64, f64), action: &str) {
+    let key = ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8);
+    let mut seen = SEEN_COLORS.lock().unwrap();
+    let set = seen.get_or_insert_with(HashSet::new);
+    if !set.insert(key) {
+        return;
+    }
+    drop(seen);
+    let path = std::env::temp_dir().join("DarkInject1C").join(format!("cairo_palette_{}.log", unsafe {
+        dark_inject_common::win32::GetCurrentProcessId()
+    }));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let l = lightness(r, g, b);
+        let _ = writeln!(
+            f,
+            "rgb=({:.3},{:.3},{:.3}) lightness={:.3} -> {} mapped=({:.3},{:.3},{:.3})",
+            r, g, b, l, action, mapped.0, mapped.1, mapped.2
+        );
+    }
+}
 // IAT-слоты, которые мы уже патчили. 1С подгружает часть модулей лениво
 // (диалоги свойств, справка и т.п. — см. известное ограничение в комментарии
 // к rescan()), и разовый install() при инъекции их не видит, потому что они
@@ -41,11 +69,19 @@ pub fn set_active_colors(colors: Colors) {
 }
 
 type CairoT = isize;
+type PatternT = isize;
 type SetSourceRgbFn = extern "system" fn(CairoT, f64, f64, f64);
 type SetSourceRgbaFn = extern "system" fn(CairoT, f64, f64, f64, f64);
+// Кнопки/градиентные заливки могут задаваться не одним cairo_set_source_rgb,
+// а паттерном с несколькими цветовыми "остановками" — если светлые кнопки
+// не красятся через основной хук, дело может быть в этом.
+type PatternAddStopRgbFn = extern "system" fn(PatternT, f64, f64, f64, f64);
+type PatternAddStopRgbaFn = extern "system" fn(PatternT, f64, f64, f64, f64, f64);
 
 static mut REAL_SET_SOURCE_RGB: Option<SetSourceRgbFn> = None;
 static mut REAL_SET_SOURCE_RGBA: Option<SetSourceRgbaFn> = None;
+static mut REAL_PATTERN_ADD_STOP_RGB: Option<PatternAddStopRgbFn> = None;
+static mut REAL_PATTERN_ADD_STOP_RGBA: Option<PatternAddStopRgbaFn> = None;
 
 fn colorref_to_f64(color: u32) -> (f64, f64, f64) {
     // COLORREF = 0x00BBGGRR
@@ -68,13 +104,15 @@ fn lightness(r: f64, g: f64, b: f64) -> f64 {
 fn remap(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
     let l = lightness(r, g, b);
     let colors = *ACTIVE_COLORS.lock().unwrap();
-    if l > 0.6 {
-        colorref_to_f64(colors.bg)
+    let (mapped, action) = if l > 0.6 {
+        (colorref_to_f64(colors.bg), "bg")
     } else if l < 0.35 {
-        colorref_to_f64(colors.text)
+        (colorref_to_f64(colors.text), "text")
     } else {
-        (r, g, b)
-    }
+        ((r, g, b), "unchanged")
+    };
+    log_color_if_new(r, g, b, mapped, action);
+    mapped
 }
 
 extern "system" fn hook_set_source_rgb(cr: CairoT, r: f64, g: f64, b: f64) {
@@ -85,6 +123,16 @@ extern "system" fn hook_set_source_rgb(cr: CairoT, r: f64, g: f64, b: f64) {
 extern "system" fn hook_set_source_rgba(cr: CairoT, r: f64, g: f64, b: f64, a: f64) {
     let (r, g, b) = remap(r, g, b);
     unsafe { REAL_SET_SOURCE_RGBA.expect("hook installed without real fn")(cr, r, g, b, a) }
+}
+
+extern "system" fn hook_pattern_add_stop_rgb(pattern: PatternT, offset: f64, r: f64, g: f64, b: f64) {
+    let (r, g, b) = remap(r, g, b);
+    unsafe { REAL_PATTERN_ADD_STOP_RGB.expect("hook installed without real fn")(pattern, offset, r, g, b) }
+}
+
+extern "system" fn hook_pattern_add_stop_rgba(pattern: PatternT, offset: f64, r: f64, g: f64, b: f64, a: f64) {
+    let (r, g, b) = remap(r, g, b);
+    unsafe { REAL_PATTERN_ADD_STOP_RGBA.expect("hook installed without real fn")(pattern, offset, r, g, b, a) }
 }
 
 /// Патчит IAT всех модулей процесса, подменяя cairo_set_source_rgb(a) из
@@ -107,7 +155,12 @@ pub fn rescan() {
     unsafe {
         for_each_import_across_process(
             "cairo.dll",
-            &["cairo_set_source_rgb", "cairo_set_source_rgba"],
+            &[
+                "cairo_set_source_rgb",
+                "cairo_set_source_rgba",
+                "cairo_pattern_add_color_stop_rgb",
+                "cairo_pattern_add_color_stop_rgba",
+            ],
             |name, slot| {
                 let key = slot as usize;
                 if !seen.insert(key) {
@@ -121,6 +174,16 @@ pub fn rescan() {
                     "cairo_set_source_rgba" => {
                         let original = patch_iat_slot(slot, hook_set_source_rgba as *const () as usize);
                         REAL_SET_SOURCE_RGBA = Some(std::mem::transmute::<usize, SetSourceRgbaFn>(original));
+                    }
+                    "cairo_pattern_add_color_stop_rgb" => {
+                        let original = patch_iat_slot(slot, hook_pattern_add_stop_rgb as *const () as usize);
+                        REAL_PATTERN_ADD_STOP_RGB =
+                            Some(std::mem::transmute::<usize, PatternAddStopRgbFn>(original));
+                    }
+                    "cairo_pattern_add_color_stop_rgba" => {
+                        let original = patch_iat_slot(slot, hook_pattern_add_stop_rgba as *const () as usize);
+                        REAL_PATTERN_ADD_STOP_RGBA =
+                            Some(std::mem::transmute::<usize, PatternAddStopRgbaFn>(original));
                     }
                     _ => {}
                 }
