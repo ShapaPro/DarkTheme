@@ -8,6 +8,13 @@ use std::path::PathBuf;
 
 const STATE_NAME: &str = "Local\\DarkInject1C_State";
 const TH32CS_SNAPTHREAD_LOCAL: u32 = TH32CS_SNAPTHREAD;
+// Инъекция обычно происходит раньше, чем 1С успевает создать хоть одно окно
+// (наблюдалось эмпирически: разовый снимок иерархии сразу при инъекции даёт
+// пустой список). Поэтому переснимаем иерархию каждую секунду в течение
+// первых HIERARCHY_LOG_TICKS секунд после инъекции — этого времени достаточно
+// пользователю, чтобы 1С показала окно выбора инфобазы и/или пользователь сам
+// открыл конфигурацию, и тогда реальные классы окон попадут в лог.
+const HIERARCHY_LOG_TICKS: u32 = 120;
 
 fn log_path(pid: u32) -> PathBuf {
     let dir = std::env::temp_dir().join("DarkInject1C");
@@ -96,11 +103,16 @@ pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
         f.set(true);
     }
 
+    let mut tick: u32 = 0;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let enabled = flag.as_ref().map(|f| f.get()).unwrap_or(true);
         if enabled {
             recolor_pass(pid);
+        }
+        if tick < HIERARCHY_LOG_TICKS {
+            log_current_window_hierarchy(pid);
+            tick += 1;
         }
     }
 }
