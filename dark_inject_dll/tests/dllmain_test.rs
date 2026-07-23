@@ -38,7 +38,7 @@ fn dllmain_logs_window_hierarchy_of_its_own_process() {
     let mut found = false;
     while Instant::now() < deadline {
         if let Ok(contents) = std::fs::read_to_string(&log_path) {
-            if contents.contains("window hierarchy at injection") {
+            if contents.contains("window hierarchy changed") {
                 found = true;
                 break;
             }

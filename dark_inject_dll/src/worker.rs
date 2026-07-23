@@ -8,13 +8,6 @@ use std::path::PathBuf;
 
 const STATE_NAME: &str = "Local\\DarkInject1C_State";
 const TH32CS_SNAPTHREAD_LOCAL: u32 = TH32CS_SNAPTHREAD;
-// Инъекция обычно происходит раньше, чем 1С успевает создать хоть одно окно
-// (наблюдалось эмпирически: разовый снимок иерархии сразу при инъекции даёт
-// пустой список). Поэтому переснимаем иерархию каждую секунду в течение
-// первых HIERARCHY_LOG_TICKS секунд после инъекции — этого времени достаточно
-// пользователю, чтобы 1С показала окно выбора инфобазы и/или пользователь сам
-// открыл конфигурацию, и тогда реальные классы окон попадут в лог.
-const HIERARCHY_LOG_TICKS: u32 = 120;
 
 fn log_path(pid: u32) -> PathBuf {
     let dir = std::env::temp_dir().join("DarkInject1C");
@@ -70,17 +63,35 @@ fn threads_of_current_process() -> Vec<u32> {
     result
 }
 
-fn log_current_window_hierarchy(pid: u32) {
-    let path = log_path(pid);
-    let mut f = match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let _ = writeln!(f, "--- window hierarchy at injection, pid={} ---", pid);
-    for hwnd in windows_of_process(pid) {
-        let class_name = get_class_name(hwnd);
-        let _ = writeln!(f, "hwnd={:#x} class={}", hwnd, class_name);
+fn current_snapshot(pid: u32) -> Vec<(HWND, String)> {
+    windows_of_process(pid)
+        .into_iter()
+        .map(|hwnd| (hwnd, get_class_name(hwnd)))
+        .collect()
+}
+
+/// Дописывает снимок иерархии в лог, только если он отличается от
+/// предыдущего. Инъекция обычно происходит раньше, чем 1С успевает создать
+/// реальные окна (метаданные появляются только после того, как пользователь
+/// вручную откроет базу и конфигурацию — это может занять произвольное время,
+/// вплоть до нескольких минут). Разовый снимок при инъекции или снимок с
+/// ограничением по количеству тиков (что пробовалось раньше) может не
+/// дождаться этого момента. Сравнение с предыдущим снимком даёт лог без
+/// ограничения по времени и без неограниченного роста на пустом месте:
+/// новая запись появляется только когда реально что-то изменилось.
+fn log_hierarchy_if_changed(pid: u32, last: &mut Option<Vec<(HWND, String)>>) {
+    let snapshot = current_snapshot(pid);
+    if last.as_ref() == Some(&snapshot) {
+        return;
     }
+    let path = log_path(pid);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "--- window hierarchy changed, pid={} ---", pid);
+        for (hwnd, class_name) in &snapshot {
+            let _ = writeln!(f, "hwnd={:#x} class={}", hwnd, class_name);
+        }
+    }
+    *last = Some(snapshot);
 }
 
 pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
@@ -90,7 +101,8 @@ pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
     let config = load_config(hinst);
     set_active_colors(config.colors);
 
-    log_current_window_hierarchy(pid);
+    let mut last_hierarchy: Option<Vec<(HWND, String)>> = None;
+    log_hierarchy_if_changed(pid, &mut last_hierarchy);
 
     for thread_id in threads_of_current_process() {
         install_hook_for_thread(thread_id);
@@ -103,17 +115,13 @@ pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
         f.set(true);
     }
 
-    let mut tick: u32 = 0;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let enabled = flag.as_ref().map(|f| f.get()).unwrap_or(true);
         if enabled {
             recolor_pass(pid);
         }
-        if tick < HIERARCHY_LOG_TICKS {
-            log_current_window_hierarchy(pid);
-            tick += 1;
-        }
+        log_hierarchy_if_changed(pid, &mut last_hierarchy);
     }
 }
 
