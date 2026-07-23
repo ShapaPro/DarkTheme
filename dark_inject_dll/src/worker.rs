@@ -15,15 +15,26 @@ fn log_path(pid: u32) -> PathBuf {
     dir.join(format!("{}.log", pid))
 }
 
-fn config_path() -> PathBuf {
-    // dark_inject.toml лежит рядом с watcher.exe / dark_inject.dll в одном каталоге.
-    let mut exe_dir = std::env::current_exe().unwrap_or_default();
-    exe_dir.pop();
-    exe_dir.join("dark_inject.toml")
+fn config_path(hinst: HINSTANCE) -> PathBuf {
+    // dark_inject.toml лежит рядом с самой dark_inject_dll.dll. Once injected
+    // into a host process, std::env::current_exe() would resolve to the
+    // HOST's exe (e.g. 1cv8.exe), not this DLL — so we resolve our own path
+    // via GetModuleFileNameW on the module handle DllMain received, which is
+    // this DLL's own hinstance, not the host's.
+    use std::os::windows::ffi::OsStringExt;
+    let mut buf = [0u16; 260];
+    let len = unsafe { GetModuleFileNameW(hinst, buf.as_mut_ptr(), buf.len() as u32) };
+    if len == 0 {
+        return PathBuf::from("dark_inject.toml");
+    }
+    let mut path = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len as usize]));
+    path.pop();
+    path.push("dark_inject.toml");
+    path
 }
 
-fn load_config() -> Config {
-    let path = config_path();
+fn load_config(hinst: HINSTANCE) -> Config {
+    let path = config_path(hinst);
     Config::load_from_path(&path).unwrap_or_else(|_| Config::default_colors())
 }
 
@@ -65,10 +76,11 @@ fn log_current_window_hierarchy(pid: u32) {
     }
 }
 
-pub extern "system" fn run(_param: *mut std::ffi::c_void) -> u32 {
+pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
     let pid = unsafe { GetCurrentProcessId() };
+    let hinst = param as HINSTANCE;
 
-    let config = load_config();
+    let config = load_config(hinst);
     set_active_colors(config.colors);
 
     log_current_window_hierarchy(pid);
