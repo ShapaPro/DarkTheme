@@ -207,6 +207,16 @@ extern "system" {
         lpEnumFunc: extern "system" fn(HWND, isize) -> i32,
         lParam: isize,
     ) -> i32;
+    // EnumWindows перечисляет только top-level окна. Реальные контролы
+    // (дерево метаданных, списки) почти всегда являются ДОЧЕРНИМИ окнами
+    // какого-то top-level фрейма, а не top-level сами по себе — EnumWindows
+    // их никогда не увидит. EnumChildWindows рекурсивно обходит все
+    // дочерние окна (включая внуков) конкретного родителя.
+    pub fn EnumChildWindows(
+        hWndParent: HWND,
+        lpEnumFunc: extern "system" fn(HWND, isize) -> i32,
+        lParam: isize,
+    ) -> i32;
     pub fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut u32) -> u32;
     pub fn GetClassNameW(hWnd: HWND, lpClassName: *mut u16, nMaxCount: i32) -> i32;
     pub fn SendMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
