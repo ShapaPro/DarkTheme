@@ -96,6 +96,33 @@ pub const GWL_STYLE: i32 = -16;
 pub const WS_CHILD: u32 = 0x4000_0000;
 pub const WH_CBT: i32 = 5;
 pub const HCBT_CREATEWND: i32 = 3;
+// WH_CALLWNDPROCRET: fires AFTER the target window procedure has handled a
+// message. Used together with WH_CBT/HCBT_CREATEWND (see hook.rs): at
+// HCBT_CREATEWND the HWND exists but neither WM_NCCREATE nor WM_CREATE have
+// been sent yet, so a real common control's per-instance color storage does
+// not exist — sending e.g. TVM_SETBKCOLOR at that point is a silent no-op
+// (confirmed empirically in Task 8, on a real SysTreeView32 window: the
+// "previous" value it returns is 0/unhandled and the color never sticks).
+// Empirically (also Task 8), the same is still true immediately after
+// WM_NCCREATE finishes — SysTreeView32 allocates its color-storage state
+// only during its own WM_CREATE handling, not WM_NCCREATE. Catching WM_CREATE
+// via WH_CALLWNDPROCRET (nCode == HC_ACTION) lets us recolor right after that
+// handling has run — still perfectly synchronous and still strictly before
+// first paint (no message loop has run yet at that point during
+// CreateWindowEx), but now the control's internal state actually exists so
+// the color messages take effect.
+pub const WH_CALLWNDPROCRET: i32 = 12;
+pub const HC_ACTION: i32 = 0;
+pub const WM_CREATE: u32 = 0x0001;
+
+#[repr(C)]
+pub struct CWPRETSTRUCT {
+    pub lResult: isize,
+    pub lParam: isize,
+    pub wParam: usize,
+    pub message: u32,
+    pub hwnd: HWND,
+}
 
 // --- comctl32 init flags ---
 pub const ICC_LISTVIEW_CLASSES: u32 = 0x0000_0001; // listview + header
