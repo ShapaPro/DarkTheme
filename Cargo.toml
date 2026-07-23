@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "dark_inject_common",
+    "dark_inject_dll",
+    "dark_inject_watcher",
+    "marker_dll_fixture",
+]
