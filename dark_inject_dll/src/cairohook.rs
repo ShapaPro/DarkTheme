@@ -24,9 +24,17 @@
 
 use dark_inject_common::config::Colors;
 use dark_inject_common::iat::{for_each_import_across_process, patch_iat_slot};
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 static ACTIVE_COLORS: Mutex<Colors> = Mutex::new(Colors { bg: 0x1E1E1E, text: 0xD4D4D4, line: 0x3C3C3C });
+// IAT-слоты, которые мы уже патчили. 1С подгружает часть модулей лениво
+// (диалоги свойств, справка и т.п. — см. известное ограничение в комментарии
+// к rescan()), и разовый install() при инъекции их не видит, потому что они
+// ещё не загружены. Без этого множества повторный скан перепатчил бы уже
+// подмененный слот, приняв наш же hook-указатель за "оригинальную" функцию —
+// вызов ушёл бы в бесконечную рекурсию.
+static PATCHED_SLOTS: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
 
 pub fn set_active_colors(colors: Colors) {
     *ACTIVE_COLORS.lock().unwrap() = colors;
@@ -82,26 +90,47 @@ extern "system" fn hook_set_source_rgba(cr: CairoT, r: f64, g: f64, b: f64, a: f
 /// Патчит IAT всех модулей процесса, подменяя cairo_set_source_rgb(a) из
 /// cairo.dll на наши обёртки. Реальный вызывающий модуль — не сам 1cv8.exe, а
 /// grphcs.dll (внутренний "мост" 1С к cairo), поэтому сканируем ВСЕ модули
-/// процесса, а не только главный exe. Небезопасно вызывать дважды за время
-/// жизни процесса (аналогично gdihook::install).
-pub fn install() {
+/// процесса, а не только главный exe.
+///
+/// Идемпотентно: уже пропатченные слоты пропускаются (см. PATCHED_SLOTS) —
+/// безопасно вызывать многократно. Это важно, потому что 1С подгружает часть
+/// модулей ЛЕНИВО (диалоги свойств объектов, справка и т.п. появляются уже
+/// после инъекции) — разовый вызов при старте их не видит. Вызывающий код
+/// (worker.rs) должен периодически вызывать rescan() повторно, чтобы поймать
+/// такие поздние модули — это тот же приём, что описан во внешнем источнике
+/// как "EAT-патч для поздних модулей", только через периодический IAT-скан
+/// вместо патча таблицы экспорта самой cairo.dll (проще реализовать, ценой
+/// небольшой задержки — не мгновенно с нулевой секунды, а на следующем тике).
+pub fn rescan() {
+    let mut patched = PATCHED_SLOTS.lock().unwrap();
+    let seen = patched.get_or_insert_with(HashSet::new);
     unsafe {
         for_each_import_across_process(
             "cairo.dll",
             &["cairo_set_source_rgb", "cairo_set_source_rgba"],
-            |name, slot| match name {
-                "cairo_set_source_rgb" => {
-                    let original = patch_iat_slot(slot, hook_set_source_rgb as *const () as usize);
-                    REAL_SET_SOURCE_RGB = Some(std::mem::transmute::<usize, SetSourceRgbFn>(original));
+            |name, slot| {
+                let key = slot as usize;
+                if !seen.insert(key) {
+                    return; // уже пропатчен в прошлый раз
                 }
-                "cairo_set_source_rgba" => {
-                    let original = patch_iat_slot(slot, hook_set_source_rgba as *const () as usize);
-                    REAL_SET_SOURCE_RGBA = Some(std::mem::transmute::<usize, SetSourceRgbaFn>(original));
+                match name {
+                    "cairo_set_source_rgb" => {
+                        let original = patch_iat_slot(slot, hook_set_source_rgb as *const () as usize);
+                        REAL_SET_SOURCE_RGB = Some(std::mem::transmute::<usize, SetSourceRgbFn>(original));
+                    }
+                    "cairo_set_source_rgba" => {
+                        let original = patch_iat_slot(slot, hook_set_source_rgba as *const () as usize);
+                        REAL_SET_SOURCE_RGBA = Some(std::mem::transmute::<usize, SetSourceRgbaFn>(original));
+                    }
+                    _ => {}
                 }
-                _ => {}
             },
         );
     }
+}
+
+pub fn install() {
+    rescan();
 }
 
 #[cfg(test)]

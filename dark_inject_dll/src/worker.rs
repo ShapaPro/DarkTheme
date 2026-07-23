@@ -131,10 +131,9 @@ pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
     set_active_colors(config.colors);
     crate::gdihook::set_active_colors(config.colors);
     crate::cairohook::set_active_colors(config.colors);
-    // Красим содержимое (не только рамку) через подмену GDI- и cairo-вызовов
-    // в IAT всех модулей процесса — см. gdihook.rs/cairohook.rs за тем, почему
-    // обычный SendMessage-подход (color.rs/hook.rs) не имеет адресата в этом
-    // конкретном приложении (1С рисует всё сама, реальный рендер — cairo).
+    // Перекраска содержимого окна: color.rs/hook.rs недостаточно в этом
+    // конкретном приложении, дополнительно применяются модули gdihook и
+    // cairohook (детали — в их собственных файлах).
     crate::gdihook::install();
     crate::cairohook::install();
 
@@ -157,6 +156,11 @@ pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
         let enabled = flag.as_ref().map(|f| f.get()).unwrap_or(true);
         if enabled {
             recolor_pass(pid);
+            // 1С подгружает часть модулей лениво (диалоги свойств, справка
+            // и т.п.) уже после инъекции — повторный (идемпотентный) скан
+            // ловит их IAT, как только они появляются.
+            crate::gdihook::rescan();
+            crate::cairohook::rescan();
         }
         log_hierarchy_if_changed(pid, &mut last_hierarchy);
     }

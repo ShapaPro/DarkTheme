@@ -16,9 +16,15 @@
 use dark_inject_common::config::Colors;
 use dark_inject_common::iat::{for_each_import_across_process, patch_iat_slot};
 use dark_inject_common::win32::*;
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 static ACTIVE_COLORS: Mutex<Colors> = Mutex::new(Colors { bg: 0x1E1E1E, text: 0xD4D4D4, line: 0x3C3C3C });
+// См. cairohook.rs::PATCHED_SLOTS за тем, почему это нужно: 1С подгружает
+// часть модулей лениво, повторный скан не должен перепатчивать уже
+// подмененные слоты (иначе наш собственный hook попадёт в REAL_* и вызов
+// уйдёт в бесконечную рекурсию).
+static PATCHED_SLOTS: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
 
 pub fn set_active_colors(colors: Colors) {
     *ACTIVE_COLORS.lock().unwrap() = colors;
@@ -85,32 +91,43 @@ extern "system" fn hook_create_solid_brush(color: u32) -> HBRUSH {
 }
 
 /// Патчит IAT всех модулей процесса, подменяя SetBkColor/SetTextColor/
-/// CreateSolidBrush из gdi32.dll на наши обёртки. Небезопасно вызывать
-/// дважды (перезапишет уже нашими же указателями сохранённые REAL_*, что
-/// превратится в бесконечную рекурсию) — вызывать один раз за время жизни
-/// процесса, обычно сразу при инъекции.
-pub fn install() {
+/// CreateSolidBrush из gdi32.dll на наши обёртки. Идемпотентно (уже
+/// пропатченные слоты пропускаются, см. PATCHED_SLOTS) — безопасно вызывать
+/// многократно, чтобы поймать модули, догруженные уже после инъекции.
+pub fn rescan() {
+    let mut patched = PATCHED_SLOTS.lock().unwrap();
+    let seen = patched.get_or_insert_with(HashSet::new);
     unsafe {
         for_each_import_across_process(
             "gdi32.dll",
             &["SetBkColor", "SetTextColor", "CreateSolidBrush"],
-            |name, slot| match name {
-                "SetBkColor" => {
-                    let original = patch_iat_slot(slot, hook_set_bk_color as *const () as usize);
-                    REAL_SET_BK_COLOR = Some(std::mem::transmute::<usize, SetBkColorFn>(original));
+            |name, slot| {
+                let key = slot as usize;
+                if !seen.insert(key) {
+                    return;
                 }
-                "SetTextColor" => {
-                    let original = patch_iat_slot(slot, hook_set_text_color as *const () as usize);
-                    REAL_SET_TEXT_COLOR = Some(std::mem::transmute::<usize, SetTextColorFn>(original));
+                match name {
+                    "SetBkColor" => {
+                        let original = patch_iat_slot(slot, hook_set_bk_color as *const () as usize);
+                        REAL_SET_BK_COLOR = Some(std::mem::transmute::<usize, SetBkColorFn>(original));
+                    }
+                    "SetTextColor" => {
+                        let original = patch_iat_slot(slot, hook_set_text_color as *const () as usize);
+                        REAL_SET_TEXT_COLOR = Some(std::mem::transmute::<usize, SetTextColorFn>(original));
+                    }
+                    "CreateSolidBrush" => {
+                        let original = patch_iat_slot(slot, hook_create_solid_brush as *const () as usize);
+                        REAL_CREATE_SOLID_BRUSH = Some(std::mem::transmute::<usize, CreateSolidBrushFn>(original));
+                    }
+                    _ => {}
                 }
-                "CreateSolidBrush" => {
-                    let original = patch_iat_slot(slot, hook_create_solid_brush as *const () as usize);
-                    REAL_CREATE_SOLID_BRUSH = Some(std::mem::transmute::<usize, CreateSolidBrushFn>(original));
-                }
-                _ => {}
             },
         );
     }
+}
+
+pub fn install() {
+    rescan();
 }
 
 #[cfg(test)]
