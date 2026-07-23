@@ -264,6 +264,57 @@ pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(once(0)).collect()
 }
 
+pub const WM_HOTKEY: u32 = 0x0312;
+pub const MOD_ALT: u32 = 0x0001;
+pub const MOD_CONTROL: u32 = 0x0002;
+pub const VK_D: u32 = 0x44;
+pub const WM_DESTROY: u32 = 0x0002;
+pub const CS_HREDRAW: u32 = 0x0002;
+pub const CS_VREDRAW: u32 = 0x0001;
+
+#[repr(C)]
+pub struct WNDCLASSW {
+    pub style: u32,
+    pub lpfnWndProc: extern "system" fn(HWND, u32, usize, isize) -> isize,
+    pub cbClsExtra: i32,
+    pub cbWndExtra: i32,
+    pub hInstance: HINSTANCE,
+    pub hIcon: isize,
+    pub hCursor: isize,
+    pub hbrBackground: isize,
+    pub lpszMenuName: *const u16,
+    pub lpszClassName: *const u16,
+}
+
+#[repr(C)]
+pub struct MSG {
+    pub hwnd: HWND,
+    pub message: u32,
+    pub wParam: usize,
+    pub lParam: isize,
+    pub time: u32,
+    pub pt_x: i32,
+    pub pt_y: i32,
+}
+
+impl Default for MSG {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+extern "system" {
+    pub fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
+    pub fn DefWindowProcW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
+    pub fn RegisterHotKey(hWnd: HWND, id: i32, fsModifiers: u32, vk: u32) -> i32;
+    pub fn UnregisterHotKey(hWnd: HWND, id: i32) -> i32;
+    pub fn PeekMessageW(lpMsg: *mut MSG, hWnd: HWND, wMsgFilterMin: u32, wMsgFilterMax: u32, wRemoveMsg: u32) -> i32;
+    pub fn TranslateMessage(lpMsg: *const MSG) -> i32;
+    pub fn DispatchMessageW(lpMsg: *const MSG) -> isize;
+}
+
+pub const PM_REMOVE: u32 = 0x0001;
+
 #[cfg(test)]
 mod tests {
     use super::*;
