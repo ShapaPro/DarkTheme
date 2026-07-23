@@ -85,6 +85,7 @@ pub const LVM_GETBKCOLOR: u32 = 0x1000; // LVM_FIRST + 0
 // НЕ ОТПРАВЛЯТЬ этот message реальным Header-контролам. Оставлено как
 // константа для документации находки; вызывающий код должен красить
 // SysHeader32 только через SetWindowTheme.
+#[deprecated(note = "not a real Win32 message — aliases HDM_INSERTITEMA and crashes real SysHeader32 controls, see comment above; never send this")]
 pub const HDM_SETBKCOLOR: u32 = 0x1201;
 
 // --- DWM ---
