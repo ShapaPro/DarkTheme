@@ -66,6 +66,7 @@ pub const PAGE_READWRITE: u32 = 0x04;
 // --- File mapping (shared state) ---
 pub const FILE_MAP_WRITE: u32 = 0x0002;
 pub const FILE_MAP_READ: u32 = 0x0004;
+pub const ERROR_ALREADY_EXISTS: u32 = 183;
 
 // --- Common control messages (значения из CLAUDE.md, уже проверенные ранее) ---
 pub const TVM_SETBKCOLOR: u32 = 0x111D;
@@ -162,6 +163,7 @@ extern "system" {
     pub fn GetCurrentProcessId() -> u32;
     pub fn GetCurrentThreadId() -> u32;
     pub fn GetModuleFileNameW(hModule: HMODULE, lpFilename: *mut u16, nSize: u32) -> u32;
+    pub fn GetLastError() -> u32;
 
     // user32
     pub fn EnumWindows(

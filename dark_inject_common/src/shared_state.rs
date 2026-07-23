@@ -6,7 +6,12 @@ pub struct SharedFlag {
     view: *mut AtomicU32,
 }
 
+// SAFETY: SharedFlag is Send because the shared *mut AtomicU32 is accessed only through
+// atomic operations on that single location, so concurrent access from multiple threads is sound.
 unsafe impl Send for SharedFlag {}
+
+// SAFETY: SharedFlag is Sync because the shared *mut AtomicU32 is accessed only through
+// atomic operations on that single location, so concurrent access from multiple threads/processes is sound.
 unsafe impl Sync for SharedFlag {}
 
 impl SharedFlag {
@@ -27,6 +32,16 @@ impl SharedFlag {
             );
             if handle == 0 {
                 return Err("CreateFileMappingW failed".to_string());
+            }
+            // SAFETY: All callers of open_or_create must request the same mapping size (currently
+            // always size_of::<u32>() for a single flag). CreateFileMappingW silently reuses a
+            // pre-existing mapping of a different size without erroring, so a size mismatch across
+            // callers would silently corrupt access. This crate has no way to validate the
+            // pre-existing mapping's actual size from the handle alone, so this is a documented
+            // invariant rather than a runtime check.
+            let last_error = GetLastError();
+            if last_error == ERROR_ALREADY_EXISTS {
+                // Re-using existing mapping; caller must ensure size matches.
             }
             let view = MapViewOfFile(handle, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, std::mem::size_of::<u32>());
             if view.is_null() {
