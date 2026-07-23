@@ -1,1 +1,2 @@
-// заполняется в Task 2-4
+pub mod win32;
+pub mod config;
