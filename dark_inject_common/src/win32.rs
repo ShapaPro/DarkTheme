@@ -134,6 +134,15 @@ pub struct INITCOMMONCONTROLSEX {
     pub dwICC: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RECT {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
 // --- Window creation for tests ---
 pub const HWND_MESSAGE: isize = -3;
 
@@ -219,6 +228,9 @@ extern "system" {
     ) -> i32;
     pub fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut u32) -> u32;
     pub fn GetClassNameW(hWnd: HWND, lpClassName: *mut u16, nMaxCount: i32) -> i32;
+    pub fn GetWindowTextW(hWnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
+    pub fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> i32;
+    pub fn GetParent(hWnd: HWND) -> HWND;
     pub fn SendMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
     pub fn SetWindowsHookExW(
         idHook: i32,

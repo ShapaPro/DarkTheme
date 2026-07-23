@@ -58,6 +58,25 @@ pub fn get_class_name(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..len as usize])
 }
 
+pub fn get_window_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
+
+pub fn get_window_rect(hwnd: HWND) -> Option<RECT> {
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let ok = unsafe { GetWindowRect(hwnd, &mut rect) };
+    if ok == 0 {
+        None
+    } else {
+        Some(rect)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

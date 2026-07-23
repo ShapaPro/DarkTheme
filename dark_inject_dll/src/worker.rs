@@ -1,10 +1,19 @@
 use crate::hook::{install_hook_for_thread, recolor_pass, set_active_colors, uninstall_all_hooks};
 use dark_inject_common::config::Config;
-use dark_inject_common::enum_windows::{get_class_name, windows_of_process};
+use dark_inject_common::enum_windows::{get_class_name, get_window_rect, get_window_text, windows_of_process};
 use dark_inject_common::shared_state::SharedFlag;
 use dark_inject_common::win32::*;
 use std::io::Write;
 use std::path::PathBuf;
+
+#[derive(Clone, PartialEq)]
+struct WindowInfo {
+    hwnd: HWND,
+    class: String,
+    parent: HWND,
+    rect: Option<RECT>,
+    text: String,
+}
 
 const STATE_NAME: &str = "Local\\DarkInject1C_State";
 const TH32CS_SNAPTHREAD_LOCAL: u32 = TH32CS_SNAPTHREAD;
@@ -63,10 +72,16 @@ fn threads_of_current_process() -> Vec<u32> {
     result
 }
 
-fn current_snapshot(pid: u32) -> Vec<(HWND, String)> {
+fn current_snapshot(pid: u32) -> Vec<WindowInfo> {
     windows_of_process(pid)
         .into_iter()
-        .map(|hwnd| (hwnd, get_class_name(hwnd)))
+        .map(|hwnd| WindowInfo {
+            hwnd,
+            class: get_class_name(hwnd),
+            parent: unsafe { GetParent(hwnd) },
+            rect: get_window_rect(hwnd),
+            text: get_window_text(hwnd),
+        })
         .collect()
 }
 
@@ -79,7 +94,13 @@ fn current_snapshot(pid: u32) -> Vec<(HWND, String)> {
 /// дождаться этого момента. Сравнение с предыдущим снимком даёт лог без
 /// ограничения по времени и без неограниченного роста на пустом месте:
 /// новая запись появляется только когда реально что-то изменилось.
-fn log_hierarchy_if_changed(pid: u32, last: &mut Option<Vec<(HWND, String)>>) {
+///
+/// Помимо класса, пишем родителя/размер/текст окна — простой class name
+/// оказался недостаточным диагностическим сигналом (1С использует общий
+/// класс "V8Window" для очень разных по смыслу панелей), а координаты и
+/// родитель позволяют вручную сопоставить конкретный hwnd с тем, что видно
+/// на экране.
+fn log_hierarchy_if_changed(pid: u32, last: &mut Option<Vec<WindowInfo>>) {
     let snapshot = current_snapshot(pid);
     if last.as_ref() == Some(&snapshot) {
         return;
@@ -87,8 +108,16 @@ fn log_hierarchy_if_changed(pid: u32, last: &mut Option<Vec<(HWND, String)>>) {
     let path = log_path(pid);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "--- window hierarchy changed, pid={} ---", pid);
-        for (hwnd, class_name) in &snapshot {
-            let _ = writeln!(f, "hwnd={:#x} class={}", hwnd, class_name);
+        for w in &snapshot {
+            let rect_str = match w.rect {
+                Some(r) => format!("{}x{}", r.right - r.left, r.bottom - r.top),
+                None => "?".to_string(),
+            };
+            let _ = writeln!(
+                f,
+                "hwnd={:#x} parent={:#x} class={} size={} text=\"{}\"",
+                w.hwnd, w.parent, w.class, rect_str, w.text
+            );
         }
     }
     *last = Some(snapshot);
@@ -101,7 +130,7 @@ pub extern "system" fn run(param: *mut std::ffi::c_void) -> u32 {
     let config = load_config(hinst);
     set_active_colors(config.colors);
 
-    let mut last_hierarchy: Option<Vec<(HWND, String)>> = None;
+    let mut last_hierarchy: Option<Vec<WindowInfo>> = None;
     log_hierarchy_if_changed(pid, &mut last_hierarchy);
 
     for thread_id in threads_of_current_process() {
