@@ -70,6 +70,68 @@ pub fn set_active_colors(colors: Colors) {
 
 type CairoT = isize;
 type PatternT = isize;
+
+// cairo_glyph_t { unsigned long index; double x; double y; } — на Windows
+// (LLP64) unsigned long = 4 байта, repr(C) сам вставит паддинг перед x, чтобы
+// выровнять double на 8 байт — то же самое, что делает настоящий C-компилятор.
+#[repr(C)]
+struct CairoGlyph {
+    index: u32,
+    x: f64,
+    y: f64,
+}
+
+type ShowGlyphsFn = extern "system" fn(CairoT, *const CairoGlyph, i32);
+static mut REAL_SHOW_GLYPHS: Option<ShowGlyphsFn> = None;
+
+// 1С/движок рендера рисуют текст в два прохода (основной + emboss-тень со
+// сдвигом на 1-2px) — оба прохода красятся нашей же remap()-эвристикой, но
+// разными "предыдущими" вызовами SetSourceRgb, из-за чего вокруг символов
+// появляется гало/двоение (см. CLAUDE.md/ledger — известная проблема,
+// подтверждённая и в стороннем источнике: там же решалась через похожий
+// ring-history). Здесь — упрощённый вариант: помним только ПОСЛЕДНИЙ
+// отрисованный набор глифов (позиция первого глифа + количество), и если
+// следующий вызов рисует тот же набор со сдвигом в диапазоне (0.25, 4] px —
+// это дубль-тень, пропускаем сам вызов отрисовки (НЕ трогаем цвет, просто не
+// вызываем настоящую функцию). Сдвиг РОВНО 0 — это обычная полная
+// перерисовка (не тень), её не пропускаем.
+#[derive(Clone, Copy)]
+struct GlyphDrawRecord {
+    x: f64,
+    y: f64,
+    first_index: u32,
+    count: i32,
+}
+
+static LAST_GLYPH_DRAW: Mutex<Option<GlyphDrawRecord>> = Mutex::new(None);
+
+// Параметризовано по хранилищу состояния (а не жёстко на глобальный static),
+// чтобы тесты могли использовать свой изолированный Mutex — иначе несколько
+// тестов, обнуляющих и читающих один и тот же глобальный static параллельно
+// (cargo test по умолчанию многопоточен), ловят гонку ровно того же рода,
+// что уже однажды обнаружилась и была исправлена в enum_windows.rs.
+fn is_duplicate_glyph_draw_impl(
+    state: &Mutex<Option<GlyphDrawRecord>>,
+    x: f64,
+    y: f64,
+    first_index: u32,
+    count: i32,
+) -> bool {
+    let mut last = state.lock().unwrap();
+    let is_dup = match *last {
+        Some(prev) if prev.first_index == first_index && prev.count == count => {
+            let dist = ((x - prev.x).powi(2) + (y - prev.y).powi(2)).sqrt();
+            dist > 0.25 && dist <= 4.0
+        }
+        _ => false,
+    };
+    *last = Some(GlyphDrawRecord { x, y, first_index, count });
+    is_dup
+}
+
+fn is_duplicate_glyph_draw(x: f64, y: f64, first_index: u32, count: i32) -> bool {
+    is_duplicate_glyph_draw_impl(&LAST_GLYPH_DRAW, x, y, first_index, count)
+}
 type SetSourceRgbFn = extern "system" fn(CairoT, f64, f64, f64);
 type SetSourceRgbaFn = extern "system" fn(CairoT, f64, f64, f64, f64);
 // Кнопки/градиентные заливки могут задаваться не одним cairo_set_source_rgb,
@@ -135,6 +197,16 @@ extern "system" fn hook_pattern_add_stop_rgba(pattern: PatternT, offset: f64, r:
     unsafe { REAL_PATTERN_ADD_STOP_RGBA.expect("hook installed without real fn")(pattern, offset, r, g, b, a) }
 }
 
+extern "system" fn hook_show_glyphs(cr: CairoT, glyphs: *const CairoGlyph, num_glyphs: i32) {
+    if !glyphs.is_null() && num_glyphs > 0 {
+        let first = unsafe { &*glyphs };
+        if is_duplicate_glyph_draw(first.x, first.y, first.index, num_glyphs) {
+            return; // дубль-тень (emboss) — не рисуем второй раз, только пропускаем сам вызов
+        }
+    }
+    unsafe { REAL_SHOW_GLYPHS.expect("hook installed without real fn")(cr, glyphs, num_glyphs) }
+}
+
 /// Патчит IAT всех модулей процесса, подменяя cairo_set_source_rgb(a) из
 /// cairo.dll на наши обёртки. Реальный вызывающий модуль — не сам 1cv8.exe, а
 /// grphcs.dll (внутренний "мост" 1С к cairo), поэтому сканируем ВСЕ модули
@@ -160,6 +232,7 @@ pub fn rescan() {
                 "cairo_set_source_rgba",
                 "cairo_pattern_add_color_stop_rgb",
                 "cairo_pattern_add_color_stop_rgba",
+                "cairo_show_glyphs",
             ],
             |name, slot| {
                 let key = slot as usize;
@@ -185,6 +258,10 @@ pub fn rescan() {
                         REAL_PATTERN_ADD_STOP_RGBA =
                             Some(std::mem::transmute::<usize, PatternAddStopRgbaFn>(original));
                     }
+                    "cairo_show_glyphs" => {
+                        let original = patch_iat_slot(slot, hook_show_glyphs as *const () as usize);
+                        REAL_SHOW_GLYPHS = Some(std::mem::transmute::<usize, ShowGlyphsFn>(original));
+                    }
                     _ => {}
                 }
             },
@@ -199,6 +276,34 @@ pub fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skips_true_duplicate_shifted_by_one_pixel() {
+        let state: Mutex<Option<GlyphDrawRecord>> = Mutex::new(None);
+        assert!(!is_duplicate_glyph_draw_impl(&state, 10.0, 10.0, 42, 3)); // первый вызов — не дубль
+        assert!(is_duplicate_glyph_draw_impl(&state, 11.0, 10.0, 42, 3)); // тот же текст, сдвиг 1px — тень
+    }
+
+    #[test]
+    fn does_not_skip_exact_same_position_repaint() {
+        let state: Mutex<Option<GlyphDrawRecord>> = Mutex::new(None);
+        assert!(!is_duplicate_glyph_draw_impl(&state, 10.0, 10.0, 42, 3));
+        assert!(!is_duplicate_glyph_draw_impl(&state, 10.0, 10.0, 42, 3)); // сдвиг 0 — обычная перерисовка
+    }
+
+    #[test]
+    fn does_not_skip_different_text_at_shifted_position() {
+        let state: Mutex<Option<GlyphDrawRecord>> = Mutex::new(None);
+        assert!(!is_duplicate_glyph_draw_impl(&state, 10.0, 10.0, 42, 3));
+        assert!(!is_duplicate_glyph_draw_impl(&state, 11.0, 10.0, 99, 5)); // другой текст — не тень
+    }
+
+    #[test]
+    fn does_not_skip_large_shift_beyond_shadow_range() {
+        let state: Mutex<Option<GlyphDrawRecord>> = Mutex::new(None);
+        assert!(!is_duplicate_glyph_draw_impl(&state, 10.0, 10.0, 42, 3));
+        assert!(!is_duplicate_glyph_draw_impl(&state, 50.0, 10.0, 42, 3)); // сдвиг 40px — не тень, а другая строка
+    }
 
     #[test]
     fn remaps_light_colors_to_configured_dark_bg() {
